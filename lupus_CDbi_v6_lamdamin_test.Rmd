@@ -1,0 +1,381 @@
+---
+title: "Lupus AnalysisPart 2"
+author: "Trang Le"
+date: "1/26/2018"
+output: html_document
+---
+
+
+```{r}
+# install.packages(c("ggplot2", "broom", "glmnet"))
+library(ggplot2)
+library(broom)
+library(corrplot)
+library(RColorBrewer)
+library(glmnet)
+library(nnet) # multinomial model
+library(reshape2)
+```
+
+
+
+```{r}
+rm(list = ls())
+# load('Lupus_p1_d1_v1.Rdata')
+load('Lupus_RF_v2.Rdata')
+load('Lupus.Rdata')
+# write.csv(lupusClean, "lupusCDs.csv")
+write.csv(diagnosesClean, "lupusDiagnoses.csv")
+```
+
+### Binary CDs: Normal vs. abnormal
+
+
+```{r fig.height=3.5, fig.width=4.5}
+# xgb.plot.importance(importance_matrix = importanceScores)
+# topGenes <- importanceScores$Feature
+# importanceScores <- importanceScoresDf
+# topGenesIDs <- merge(importanceScores, combinedIDs,  by.x = "Feature", by.y = "Gene", 
+#                      sort = F)[,c("Feature", "ENTREZ_GENE_ID")]
+# importantSamples <- lupusClean[noTreatmentSamples,topGenesIDs$ENTREZ_GENE_ID]
+# dim(importantSamples)
+# colnames(importantSamples) <- topGenesIDs$Feature
+
+CDinterestedNumbers <- c(20, 22, 30, 19, 40, 72, 257, 269, 353, 38, '79a', '79b')
+
+# totalImpScores50 <- read.csv("ImportantGenesIn50.csv", row.names = 1, stringsAsFactors = F)
+# topGenes <- totalImpScores50$gene
+
+totalImpScores50 <- read.csv("GenesForAnalysis.csv", row.names = 1, stringsAsFactors = F)
+topGenes <- totalImpScores50$Gene
+# topGenes <- topGenesFinal
+
+
+topGenesFinalEntrez <- as.character(combinedIDs[combinedIDs$Gene %in% topGenes, "ENTREZ_GENE_ID"])
+# importantSamples <- importantSamples[, colnames(importantSamples) %in% topGenesFinalEntrez]
+importantSamples <- lupusClean[noTreatmentSamples, topGenesFinalEntrez]
+
+# CDinterestedNumbers <- c(20, 22, 30)
+cdNames <- paste0("CD", CDinterestedNumbers)
+CDsEntrez <- as.character(CDsannotated[
+  CDsannotated$CD_NAME %in% cdNames, "ENTREZ_GENE_ID"])
+# write.csv(CDsannotated, "AnnotatedCDs331.csv")
+
+myCDs <- data.frame(lupusData[noTreatmentSamples, CDsEntrez])
+colnames(myCDs) <- cdNames
+summary(myCDs)
+apply(myCDs, 2, sd)
+
+
+
+
+myCDvio <- data.frame(reshape2::melt(myCDs))
+colnames(myCDvio) <- c("Gene", "Expression")
+
+printCorr <- F
+
+if (printCorr == T){
+  pdf("CDviolin.pdf", height = 3, width = 4)
+  ggplot(myCDvio, aes(x = Gene, y = Expression, fill = Gene)) +
+  geom_violin(alpha = 0.5) + theme_bw() +
+  geom_boxplot(alpha = .01, width = .2, position = position_dodge(width = .9))+
+  scale_fill_brewer(palette="RdBu")
+  dev.off()
+
+# cat("Correlation among CDs:\n")
+  pdf("CDcorr.pdf", height = 4, width = 4.5)
+  corrplot(cor(myCDs), method = "pie", type="upper", order="hclust", col=brewer.pal(n=8, name="PuOr"))
+  dev.off()
+}
+
+
+cdResults <- list()
+
+# for (i in 1:length(cdNames)){
+#   CDi <- cdNames[i]
+#   CDvali <- myCDs[,CDi]
+#   markCDi <- quantile(CDvali, c(.25, .75)) 
+#   p <- ggplot(myCDs, aes_string(x = CDi)) +
+#     geom_histogram(aes(y = ..density..), fill = "#E69F00", color = "grey", position="dodge") + 
+#     geom_density() + geom_vline(xintercept = markCDi) + theme_classic()
+#   print(p)
+# 
+#   
+#   cdbinary <- (CDvali < markCDi[1] | CDvali > markCDi[2] ) # 1 is NOT normal
+#   cdidf <- data.frame(importantSamples, cd = cdbinary)
+#   # hist(cor(importantSamples, myCDs$CD20))
+#   CDiLogistic <- glm(cd ~ ., data = cdidf, family = "binomial")
+#   summary(CDiLogistic)
+#   cdiResults <- tidy(CDiLogistic)
+#   # cd20Results$pAdjusted <- p.adjust(cd20Results$p.value)
+#   cdiResults <- cdiResults[order(cdiResults$p.value),]
+#   cdResults[[i]] <- cdiResults
+#   print(head(cdiResults, 10))
+#   write.csv(cdiResults, file = paste0(CDi, "BinaryImportantGenes.csv"))
+# }
+
+
+
+```
+
+
+### Binary CDs: 
+Note: Genes <- genes * 10
+
+```{r}
+nCDs <- length(cdNames)
+nFeatures <- length(topGenes)
+elastic.results <- matrix(NA, 2*nFeatures + 2, nCDs)
+colnames(elastic.results) <- cdNames
+idStudyMap <- read.csv("idStudyMap.csv", row.names = 1)
+
+best.lambs <- vector("numeric", nCDs)
+rownames(importantSamples) <- gsub(pattern = "\\_.*", "", rownames(importantSamples))
+rownames(myCDs) <- gsub(pattern = "\\_.*", "", rownames(myCDs))
+importantSamplesMerge <- merge(importantSamples, idStudyMap, by = "row.names")
+rownames(importantSamplesMerge) <- importantSamplesMerge$Row.names
+importantSamplesMerge <- importantSamplesMerge[,-1]
+# importantSamplesMerge$y <- as.factor(importantSamplesMerge$y)
+# importantSamples <- importantSamplesMerge 
+
+
+for (i in 1:nCDs){
+  CDi <- cdNames[i]
+  CDvali <- myCDs[,CDi]
+  markCDi <- quantile(CDvali, c(.2, .8)) 
+  # p <- ggplot(myCDs, aes_string(x = CDi)) +
+  #   geom_histogram(aes(y = ..density..), fill = "#E69F00", color = "grey", position="dodge") + 
+  #   geom_density() + geom_vline(xintercept = markCDi) + theme_classic()
+  # print(p)
+    # geom_vline(data=mu, aes(xintercept=grp.mean, color=sex),
+    #            linetype="dashed")+
+    # theme(legend.position="top") + 
+    # scale_color_brewer(palette = "Dark2")
+  
+  cdtrinary <- factor((CDvali < markCDi[1]| CDvali > markCDi[2])) # low 1, high 2
+  levels(cdtrinary) <- c("Normal", "Abnormal")
+  checkTrinary <- cbind(cdtrinary, CDvali)
+  cdidf <- data.frame(importantSamples, cd = cdtrinary)
+  colnames(cdidf)[-ncol(cdidf)] <- colnames(importantSamples)
+  # hist(cor(importantSamples, myCDs$CD20))
+  xReg <- as.matrix(cdidf[,colnames(cdidf)!="cd"])
+  CDiRegression <- cv.glmnet(x = xReg[, ], y = cdidf$cd, family = "binomial", 
+                             alpha = 0.5)
+  best.lamb <- CDiRegression$lambda.min
+  elastic.coef <- predict(CDiRegression, type = "coefficients", s = best.lamb)
+  myCoefs <- data.frame(as.matrix(elastic.coef))
+  colnames(myCoefs) <- "total"
+  # myCoefs$total <- rowSums(myCoefs)
+  myCoefsShort <- myCoefs[myCoefs$total!=0,, drop = F]
+  impGenesCDi <- rownames(myCoefsShort)[-1, drop = F]
+  multiSums <- data.frame()
+  multiSumsAll <- data.frame()
+
+  # cdtrinaryReleveled <- relevel(as.factor(cdtrinary), ref = 1)
+  if (nrow(myCoefsShort) > 1){
+  # for (j in 1:length(impGenesCDi)){
+  for (j in 1:ncol(importantSamples)){
+    # genej <- impGenesCDi[j]
+    # datj <- data.frame(gene = 10*(lupusData[noTreatmentSamples, genej]), cdtrinary)
+    genej <- colnames(importantSamples)[j]
+    datj <- data.frame(gene = importantSamplesMerge[, genej], studyID = importantSamplesMerge$x, cdtrinary)
+    # colnames(datj)[1] <- impGenesCDi[j]
+    uniMultinomial <- glm(cdtrinary ~ gene + studyID, data = datj, family = "binomial")
+    multiSum <- tidy(uniMultinomial)
+    multiSum$oddRatio <- exp(multiSum$estimate)
+    rownames(multiSum)[2] <- combinedIDs[combinedIDs$ENTREZ_GENE_ID==genej, "Gene"]
+    # colnames(multiSum)[3] <- "oddRatio" # relative risk, equal exp(coef(uniMultinomial))
+    multiSum$oddRatioL <- multiSum$oddRatio*exp(-1.96*multiSum$std.error)
+    multiSum$oddRatioR <- multiSum$oddRatio*exp(1.96*multiSum$std.error)
+    multiSums <- rbind(multiSums, multiSum[2,])
+    multiSumsAll <- rbind(multiSumsAll, multiSum)
+
+  }
+  
+  # multiSums$adjustedPval <- p.adjust(multiSums$p.value, method = "bonferroni")
+  multiSums <- multiSums[combinedIDs[combinedIDs$ENTREZ_GENE_ID %in% impGenesCDi, "Gene"],]
+  multiSums$adjustedPval <- multiSums[, "p.value"]*ncol(importantSamples)
+  multiSumsRanked <- multiSums[order(multiSums$p.value),]
+  
+  
+  ##### Added for flipping Odds Ratios #####
+  multiSumsRanked$needCorrection <- multiSumsRanked$oddRatio < 1
+  multiSumsRanked$correctedOddsRatio <- multiSumsRanked$oddRatio
+  multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatio"] <-
+    1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatio"]
+  
+  multiSumsRanked$correctedOddsRatioL <- multiSumsRanked$oddRatioL
+  multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatioL"] <-
+    1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatioR"]
+  
+  multiSumsRanked$correctedOddsRatioR <- multiSumsRanked$oddRatioR
+  multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatioR"] <-
+    1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatioL"]  
+  
+  rownames(multiSumsRanked)[multiSumsRanked$oddRatio < 1] <- 
+    paste0(rownames(multiSumsRanked)[multiSumsRanked$oddRatio < 1], "*")
+  
+  colnames(multiSumsRanked) <- c("term", "betaUncorrected", 
+                                 "std.error", "statistic", "p.value", "oddRatioUncorrected", "oddRatioLUncorrected", 
+                                 "oddRatioRUncorrected", "adjustedPval", "needCorrection","oddRatio",
+                                 "oddRatioL", "oddRatioR")
+  #####
+  # CDiRegression$beta
+  # summary(CDiRegression)
+  # cdiResults <- tidy(CDiRegression)
+  # cd20Results$pAdjusted <- p.adjust(cd20Results$p.value)
+  # cdiResults <- cdiResults[order(cdiResults$p.value),]
+  # colnames(myCoefsShort)[1:2] <- c("Bnormal", "Babnormal")
+
+  # print(head(cdiResults, 10))
+  # write.csv(multiSums, file = paste0("resultsMultiSURF/", CDi, "indBinaryMultinomial.csv"))
+  write.csv(multiSumsAll, file = paste0("resultsMultiSURF/", CDi, "withBatchBinomialRankedLambdamin.csv"))
+  save(CDiRegression, best.lamb, elastic.coef, myCoefs, file = paste0("resultsElasticNet/BatchCorrected", CDi, ".Rdata"))
+  write.csv(multiSumsRanked, file = paste0("resultsMultiSURF/", CDi, "BatchCorrectedBinomialRankedLambdamin.csv"))
+  }
+  cdResults[[i]] <- myCoefsShort
+  # write.csv(cdResults[[i]], file = paste0("resultsMultiSURF/", CDi, "BinaryImpGenes.csv"))
+}
+```
+
+
+
+
+Checking CD expression across studies:
+```{r}
+myCDsMerge <- merge(myCDs, idStudyMap, by = "row.names")
+rownames(myCDsMerge) <- myCDsMerge$Row.names
+myCDsMerge <- myCDsMerge[,-1]
+myCDsMelt <- melt(myCDsMerge)
+ggplot(myCDsMelt, aes(x = variable, y = value, fill = x)) + geom_boxplot() +
+  scale_fill_manual(values=cbPalette) + theme_bw()
+
+```
+
+
+
+
+<!-- ```{r} -->
+<!-- for (i in 1:nCDs){ -->
+<!--   CDi <- cdNames[i] -->
+<!--   # CDvali <- myCDs[,CDi] -->
+<!--   studyIDpval <- read.csv(paste0("resultsMultiSURF/", CDi, "withBatchBinomialRankedLambdamin.csv"), row.names = 1) -->
+<!--   studyIDpval <- studyIDpval[!(studyIDpval$term %in% c("gene", "(Intercept)")),] -->
+<!--   studyIDpval$term <- substr(studyIDpval$term, 11, 15) -->
+<!--   studyIDpval$logp <- log10(studyIDpval$p.value) -->
+<!--   pi <- ggplot(studyIDpval, aes(x = term, y = logp)) + geom_boxplot() + xlab(CDi) + geom_hline(yintercept = log10(0.05)) -->
+<!--   ggsave(file=paste0(CDi, "studyEffect.png"), pi, height = 3.5, width = 3.5) -->
+<!-- } -->
+<!-- ``` -->
+
+
+
+
+
+<!-- ```{r} -->
+<!-- nCDs <- length(cdNames) -->
+<!-- nFeatures <- length(topGenes) -->
+<!-- elastic.results <- matrix(NA, 2*nFeatures + 2, nCDs) -->
+<!-- colnames(elastic.results) <- cdNames -->
+
+<!-- best.lambs <- vector("numeric", nCDs) -->
+
+
+<!-- for (i in 1:nCDs){ -->
+<!--   CDi <- cdNames[i] -->
+<!--   CDvali <- myCDs[,CDi] -->
+<!--   markCDi <- quantile(CDvali, c(.2, .8))  -->
+<!--   # p <- ggplot(myCDs, aes_string(x = CDi)) + -->
+<!--   #   geom_histogram(aes(y = ..density..), fill = "#E69F00", color = "grey", position="dodge") +  -->
+<!--   #   geom_density() + geom_vline(xintercept = markCDi) + theme_classic() -->
+<!--   # print(p) -->
+<!--     # geom_vline(data=mu, aes(xintercept=grp.mean, color=sex), -->
+<!--     #            linetype="dashed")+ -->
+<!--     # theme(legend.position="top") +  -->
+<!--     # scale_color_brewer(palette = "Dark2") -->
+
+<!--   cdtrinary <- factor((CDvali < markCDi[1]| CDvali > markCDi[2])) # low 1, high 2 -->
+<!--   levels(cdtrinary) <- c("Normal", "Abnormal") -->
+<!--   checkTrinary <- cbind(cdtrinary, CDvali) -->
+<!--   cdidf <- data.frame(importantSamples, cd = cdtrinary) -->
+<!--   colnames(cdidf)[-ncol(cdidf)] <- colnames(importantSamples) -->
+<!--   # hist(cor(importantSamples, myCDs$CD20)) -->
+<!--   xReg <- as.matrix(cdidf[,colnames(cdidf)!="cd"]) -->
+<!--   CDiRegression <- cv.glmnet(x = xReg, y = cdidf$cd, family = "binomial",  -->
+<!--                              alpha = 0.5) -->
+
+<!--   # elastic.fit <- glmnet(x = xReg, y = cdidf$cd, family = "multinomial", alpha = 1) -->
+<!--   # elas.beta <- data.frame(as.matrix(elastic.fit$beta)) -->
+<!--   # cv.elastic <- cv.glmnet(x = xReg, y = cdidf$cd, family = "multinomial", alpha = 1) -->
+<!--   best.lamb <- CDiRegression$lambda.1se -->
+<!--   elastic.coef <- predict(CDiRegression, type = "coefficients", s = best.lamb) -->
+<!--   myCoefs <- data.frame(as.matrix(elastic.coef)) -->
+<!--   colnames(myCoefs) <- "total" -->
+<!--   # myCoefs$total <- rowSums(myCoefs) -->
+<!--   myCoefsShort <- myCoefs[myCoefs$total!=0,, drop = F] -->
+<!--   impGenesCDi <- rownames(myCoefsShort)[-1, drop = F] -->
+<!--   multiSums <- data.frame() -->
+<!--   # cdtrinaryReleveled <- relevel(as.factor(cdtrinary), ref = 1) -->
+<!--   if (nrow(myCoefsShort) > 1){ -->
+<!--   for (j in 1:length(impGenesCDi)){ -->
+<!--     genej <- impGenesCDi[j] -->
+<!--     datj <- data.frame(gene = 10*(lupusData[noTreatmentSamples, genej]), cdtrinary) -->
+<!--     # colnames(datj)[1] <- impGenesCDi[j] -->
+<!--     uniMultinomial <- glm(cdtrinary ~ gene, data = datj, family = "binomial") -->
+<!--     multiSum <- tidy(uniMultinomial) -->
+<!--     multiSum$oddRatio <- exp(multiSum$estimate) -->
+<!--     rownames(multiSum)[2] <- combinedIDs[combinedIDs$ENTREZ_GENE_ID==impGenesCDi[j], "Gene"] -->
+<!--     # colnames(multiSum)[3] <- "oddRatio" # relative risk, equal exp(coef(uniMultinomial)) -->
+<!--     multiSum$oddRatioL <- multiSum$oddRatio*exp(-1.96*multiSum$std.error) -->
+<!--     multiSum$oddRatioR <- multiSum$oddRatio*exp(1.96*multiSum$std.error) -->
+<!--     multiSums <- rbind(multiSums, multiSum[2,]) -->
+<!--   } -->
+
+<!--   # multiSums$adjustedPval <- p.adjust(multiSum$p.value, method = "BH") -->
+<!--   multiSums$adjustedPval <- multiSums[, "p.value"]*ncol(importantSamples) -->
+<!--   # multiSums[multiSums$y.level == "High", "adjustedPval"] <- p.adjust(multiSums[multiSums$y.level == "High", "p.value"], -->
+<!--   #                                                                    method = "BH") -->
+<!--   # multiSums[multiSums$y.level == "Low", "adjustedPval"] <- p.adjust(multiSums[multiSums$y.level == "Low", "p.value"], -->
+<!--                                                                      # method = "BH") -->
+<!--   multiSumsRanked <- multiSums[order(multiSums$p.value),] -->
+
+
+<!--   ##### Added for flipping Odds Ratios ##### -->
+<!--   multiSumsRanked$needCorrection <- multiSumsRanked$oddRatio < 1 -->
+<!--   multiSumsRanked$correctedOddsRatio <- multiSumsRanked$oddRatio -->
+<!--   multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatio"] <- -->
+<!--     1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatio"] -->
+
+<!--   multiSumsRanked$correctedOddsRatioL <- multiSumsRanked$oddRatioL -->
+<!--   multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatioL"] <- -->
+<!--     1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatioR"] -->
+
+<!--   multiSumsRanked$correctedOddsRatioR <- multiSumsRanked$oddRatioR -->
+<!--   multiSumsRanked[multiSumsRanked$oddRatio < 1, "correctedOddsRatioR"] <- -->
+<!--     1/multiSumsRanked[multiSumsRanked$oddRatio < 1, "oddRatioL"]   -->
+
+<!--   rownames(multiSumsRanked)[multiSumsRanked$oddRatio < 1] <-  -->
+<!--     paste0(rownames(multiSumsRanked)[multiSumsRanked$oddRatio < 1], "*") -->
+
+<!--   colnames(multiSumsRanked) <- c("y.level", "term", "oddRatioUncorrected",  -->
+<!--                                  "std.error", "statistic", "p.value", "oddRatioLUncorrected",  -->
+<!--                                  "oddRatioRUncorrected", "adjustedPval", "needCorrection","oddRatio", -->
+<!--                                  "oddRatioL", "oddRatioR") -->
+<!--   ##### -->
+<!--   # CDiRegression$beta -->
+<!--   # summary(CDiRegression) -->
+<!--   # cdiResults <- tidy(CDiRegression) -->
+<!--   # cd20Results$pAdjusted <- p.adjust(cd20Results$p.value) -->
+<!--   # cdiResults <- cdiResults[order(cdiResults$p.value),] -->
+<!--   # colnames(myCoefsShort)[1:2] <- c("Bnormal", "Babnormal") -->
+
+<!--   # print(head(cdiResults, 10)) -->
+<!--   # write.csv(multiSums, file = paste0("resultsMultiSURF/", CDi, "indBinaryMultinomial.csv")) -->
+<!--   write.csv(multiSumsRanked, file = paste0("resultsMultiSURF/", CDi, "indBinomialRankedLambda1se.csv")) -->
+<!--   } -->
+<!--   cdResults[[i]] <- myCoefsShort -->
+<!--   # write.csv(cdResults[[i]], file = paste0("resultsMultiSURF/", CDi, "BinaryImpGenes.csv")) -->
+<!-- } -->
+<!-- ``` -->
+
+

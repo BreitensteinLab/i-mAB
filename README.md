@@ -1,5 +1,5 @@
-# i-mAB Analysis Pipeline 
-# for untangling interconnected molecular expression features
+# i-mAB Analysis Pipeline:
+# Untangling interconnected molecular expression features
 
 Integrated machine learning pipeline for aberrant biomarker enrichment (i-mAB): 
 characterizing clusters of differentiation within a compendium 
